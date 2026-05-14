@@ -285,17 +285,19 @@ function Get-CompilerCMakeFlags {
 # -----------------------------------------------------------------------------
 function Get-LLVMCMakeFlags {
     $flags = @(
-        "-C", (Join-Path $LLVMDir "clang\cmake\caches\HLSL.cmake"),
         "-DLLVM_ENABLE_ASSERTIONS=ON",
         "-DLLVM_OPTIMIZED_TABLEGEN=OFF",
         "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
 
         # Offload Test Suite & DXC Integration
+        "-DHLSL_ENABLE_OFFLOAD_DISTRIBUTION=ON"
         "-DLLVM_EXTERNAL_PROJECTS=OffloadTest",
         "-DLLVM_EXTERNAL_OFFLOADTEST_SOURCE_DIR=$OffloadTestDir",
         "-DGOLDENIMAGE_DIR=$GoldenImagesDir",
         "-DOFFLOADTEST_TEST_CLANG=ON",
         "-DDXC_DIR=$(Join-Path $DXCDir 'build\bin')",
+
+        "-C", (Join-Path $LLVMDir "clang\cmake\caches\HLSL.cmake"),
 
         # Embed debug info into each .obj (/Z7) instead of writing it to a
         # shared per-target PDB (/Zi). This avoids MSVC's LNK1140
@@ -544,10 +546,10 @@ function Invoke-UpdateSubmodules {
     Write-Host "`n=== Updating Submodules to Latest ===" -ForegroundColor Cyan
     Push-Location $ScriptDir
     try {
-        & git submodule update --remote --depth 2
-        if ($LASTEXITCODE -ne 0) { throw "git submodule update --remote failed" }
         & git submodule update --init --recursive --depth 2
         if ($LASTEXITCODE -ne 0) { throw "git submodule update --init failed" }
+        & git submodule update --remote --depth 2
+        if ($LASTEXITCODE -ne 0) { throw "git submodule update --remote failed" }
         Write-Host "Submodules updated." -ForegroundColor Green
     }
     finally {
