@@ -231,6 +231,91 @@ else {
 }
 
 # -----------------------------------------------------------------------------
+# Post-install: Add Windows Driver Kit TAEF (TE.exe) to the system PATH
+# -----------------------------------------------------------------------------
+# The DXC HLSL test suite drives TAEF via TE.exe, which ships with the Windows
+# Driver Kit under <KitsRoot10>\Testing\Runtimes\TAEF\<arch>\TE.exe.  The WDK
+# installer deliberately leaves this off PATH (it expects MSBuild integration
+# via $(KitsRoot10) to pick a per-project architecture), so we add the host
+# architecture's TAEF directory here for direct command-line use.
+Write-Host "`n--- Windows Driver Kit TAEF (TE.exe) ---" -ForegroundColor Cyan
+
+$TAEFDir = $null
+
+# Locate the Windows Kits root via the standard "Installed Roots" registry key.
+$kitsRootKeys = @(
+    "HKLM:\SOFTWARE\Microsoft\Windows Kits\Installed Roots",
+    "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows Kits\Installed Roots"
+)
+$KitsRoot10 = $null
+foreach ($krk in $kitsRootKeys) {
+    if (Test-Path $krk) {
+        $candidate = (Get-ItemProperty $krk -ErrorAction SilentlyContinue).KitsRoot10
+        if ($candidate -and (Test-Path $candidate)) {
+            $KitsRoot10 = $candidate
+            break
+        }
+    }
+}
+
+# Fall back to the default install location if the registry lookup failed.
+if (-not $KitsRoot10) {
+    $defaultRoot = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10"
+    if (Test-Path $defaultRoot) {
+        $KitsRoot10 = $defaultRoot
+    }
+}
+
+if ($KitsRoot10) {
+    # Pick the TAEF subdirectory matching the OS architecture.  TAEF ships
+    # x86 (top-level), x64, and arm64 builds; HLSL tests run as native
+    # processes so match the OS, not the PowerShell process bitness.
+    $osArch = $env:PROCESSOR_ARCHITECTURE
+    if ($env:PROCESSOR_ARCHITEW6432) { $osArch = $env:PROCESSOR_ARCHITEW6432 }
+    switch ($osArch) {
+        "AMD64" { $taefArch = "x64" }
+        "ARM64" { $taefArch = "arm64" }
+        "x86"   { $taefArch = "x86" }
+        default { $taefArch = "x64" }
+    }
+
+    $candidate = Join-Path $KitsRoot10 "Testing\Runtimes\TAEF\$taefArch"
+    if (Test-Path (Join-Path $candidate "TE.exe")) {
+        $TAEFDir = $candidate
+    }
+    else {
+        # Fall back to the top-level TAEF directory (x86) shipped with the WDK.
+        $candidate = Join-Path $KitsRoot10 "Testing\Runtimes\TAEF"
+        if (Test-Path (Join-Path $candidate "TE.exe")) {
+            $TAEFDir = $candidate
+        }
+    }
+}
+
+if ($TAEFDir) {
+    $machPath = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
+    $normalizedEntries = $machPath -split ";" | ForEach-Object { $_.TrimEnd("\").ToLowerInvariant() }
+    $normalizedTAEF = $TAEFDir.TrimEnd("\").ToLowerInvariant()
+
+    if ($normalizedEntries -contains $normalizedTAEF) {
+        Write-Host "  [OK] $TAEFDir already on system PATH" -ForegroundColor Green
+    }
+    else {
+        $newMachPath = "$machPath;$TAEFDir"
+        [System.Environment]::SetEnvironmentVariable("Path", $newMachPath, "Machine")
+        Write-Host "  [OK] Added $TAEFDir to system PATH" -ForegroundColor Green
+    }
+
+    # Also update the current session's PATH so later steps see TE.exe.
+    $env:Path = "$env:Path;$TAEFDir"
+}
+else {
+    Write-Host "  [FAILED] Could not locate TE.exe under the Windows Driver Kit." -ForegroundColor Red
+    Write-Host "           Ensure the Windows Driver Kit installed successfully and re-run this script." -ForegroundColor Red
+    $Failed += "Windows Driver Kit TAEF (TE.exe)"
+}
+
+# -----------------------------------------------------------------------------
 # Post-install: pyyaml (needed by LLVM LIT tests)
 # -----------------------------------------------------------------------------
 Write-Host "`n--- pyyaml (pip) ---" -ForegroundColor Cyan

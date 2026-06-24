@@ -19,7 +19,7 @@ Unlike hlsl-dev, Windows has no Nix equivalent, so this repo cannot offer the sa
   - C++ Clang-cl MSBuild toolset (`Microsoft.VisualStudio.Component.VC.Llvm.ClangToolset`)
   - C++ ATL for latest build tools (`Microsoft.VisualStudio.Component.VC.ATL`)
   - Windows 11 SDK 10.0.26100 (`Microsoft.VisualStudio.Component.Windows11SDK.26100`)
-  - Windows Driver Kit (`Component.Microsoft.Windows.DriverKit`) -- includes TAEF for DXC tests
+  - Windows Driver Kit (`Component.Microsoft.Windows.DriverKit`) -- includes TAEF (`TE.exe`) for DXC tests. The WDK does not put TAEF on PATH by default (it ships side-by-side x86/x64/arm64 builds and is normally consumed via MSBuild's `$(KitsRoot10)`); `install-deps.ps1` adds the host-architecture `Testing\Runtimes\TAEF\<arch>` directory to the machine PATH so `TE.exe` is directly runnable.
 - **Python 3.x** (`pip install pyyaml` for LIT tests)
 - **Git** -- Git-for-Windows' unix tools (`usr\bin`: bash, grep, sed, diff, etc.) must be on PATH for LLVM LIT tests. `install-deps.ps1` configures this automatically.
 - **Vulkan SDK** (<https://vulkan.lunarg.com/sdk/home>)
