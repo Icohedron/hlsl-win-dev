@@ -14,7 +14,7 @@
     The task to run. One of:
         check-prereqs, setup, configure-llvm, build-llvm, configure-dxc,
         build-dxc, fetch-history, truncate-history, update-submodules,
-        download-d3d, help
+        download-d3d, run-exec-tests, help
 
 .PARAMETER BuildType
     CMake build type. Defaults to RelWithDebInfo.
@@ -34,6 +34,22 @@
 .PARAMETER Repo
     Submodule name for fetch-history / truncate-history commands.
 
+.PARAMETER WarpDll
+    For run-exec-tests: path to the WARP d3d10warp.dll passed as the TAEF
+    WARP_DLL parameter. Defaults to the copy fetched by download-d3d.
+
+.PARAMETER D3D12SDKPath
+    For run-exec-tests: path to the D3D12 Agility SDK bin directory passed as
+    the TAEF D3D12SDKPath parameter. Defaults to the copy fetched by download-d3d.
+
+.PARAMETER D3D12SDKVersion
+    For run-exec-tests: value passed as the TAEF D3D12SDKVersion parameter.
+    Defaults to 1 (auto-detect, fail if the version cannot be used).
+
+.PARAMETER TaefArgs
+    For run-exec-tests: remaining arguments forwarded verbatim to TE.exe, e.g.
+    /p:"ExperimentalShaders=*" or /select:"@Name='ExecutionTest::*'".
+
 .EXAMPLE
     .\hlsl-dev.ps1 check-prereqs
     .\hlsl-dev.ps1 setup
@@ -45,6 +61,7 @@
     .\hlsl-dev.ps1 configure-llvm -Compiler cl
     .\hlsl-dev.ps1 fetch-history -Repo llvm-project
     .\hlsl-dev.ps1 download-d3d
+    .\hlsl-dev.ps1 run-exec-tests /p:"ExperimentalShaders=*"
 #>
 
 [CmdletBinding()]
@@ -55,7 +72,7 @@ param(
         "configure-llvm", "build-llvm",
         "configure-dxc", "build-dxc",
         "fetch-history", "truncate-history", "update-submodules",
-        "download-d3d",
+        "download-d3d", "run-exec-tests",
         "help"
     )]
     [string]$Command = "help",
@@ -72,7 +89,19 @@ param(
     [string]$Compiler = "cl",
 
     [ValidateSet("", "llvm-project", "DirectXShaderCompiler", "offload-test-suite", "offload-golden-images")]
-    [string]$Repo = ""
+    [string]$Repo = "",
+
+    # run-exec-tests: override the WARP d3d10warp.dll, the D3D12 Agility SDK
+    # directory, and the requested Agility SDK version passed to TAEF. When
+    # empty, WarpDll/D3D12SDKPath default to the binaries fetched by download-d3d.
+    [string]$WarpDll = "",
+    [string]$D3D12SDKPath = "",
+    [string]$D3D12SDKVersion = "1",
+
+    # run-exec-tests: any remaining arguments are forwarded verbatim to TE.exe,
+    # e.g. /p:"ExperimentalShaders=*" /select:"@Name='ExecutionTest::*'"
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$TaefArgs = @()
 )
 
 Set-StrictMode -Version Latest
@@ -851,6 +880,105 @@ function Invoke-DownloadDirect3D {
 }
 
 # -----------------------------------------------------------------------------
+# DXC Execution Tests (ExecHLSLTests.dll via TAEF / TE.exe)
+# -----------------------------------------------------------------------------
+# Runs the DirectXShaderCompiler execution test suite (ExecHLSLTests.dll) under
+# the TAEF runner (TE.exe, supplied by the Windows Driver Kit). WARP_DLL and the
+# Agility SDK default to the preview binaries fetched by download-d3d, and any
+# extra TE.exe arguments (e.g. /p:"ExperimentalShaders=*", /select:..., /name:...)
+# are forwarded verbatim. See README "Running the DXC execution tests" for the
+# full list of supported /p: runtime parameters.
+function Invoke-RunExecTests {
+    $binDir  = Join-Path $DXCDir "build\bin"
+    $testDll = Join-Path $binDir "ExecHLSLTests.dll"
+
+    if (-not (Test-Path $testDll)) {
+        Write-Host "Error: $testDll not found." -ForegroundColor Red
+        Write-Host "       Build it first: .\hlsl-dev.ps1 build-dxc -Target ExecHLSLTests" -ForegroundColor Red
+        return
+    }
+
+    # Locate the TAEF runner. install-deps.ps1 adds the WDK's host-architecture
+    # TAEF directory to PATH so TE.exe is directly runnable.
+    $te = Get-Command te.exe -ErrorAction SilentlyContinue
+    if (-not $te) {
+        throw "te.exe (TAEF) not found on PATH. Re-run install-deps.ps1 to add the Windows Driver Kit's TAEF directory to PATH."
+    }
+
+    # Resolve WARP_DLL / D3D12SDKPath, defaulting to the download-d3d binaries.
+    $warpDllPath = $WarpDll
+    if (-not $warpDllPath) {
+        $candidate = Join-Path $Direct3DPreviewDir "WARP\d3d10warp.dll"
+        if (Test-Path $candidate) { $warpDllPath = $candidate }
+    }
+
+    $sdkPath = $D3D12SDKPath
+    if (-not $sdkPath) {
+        $candidate = Join-Path $Direct3DPreviewDir "D3D12"
+        if (Test-Path $candidate) { $sdkPath = $candidate }
+    }
+
+    Write-Host "`n=== Running DXC Execution Tests (ExecHLSLTests.dll) ===" -ForegroundColor Cyan
+    Write-Host "  te.exe:    $($te.Source)" -ForegroundColor DarkGray
+    Write-Host "  Test DLL:  $testDll" -ForegroundColor DarkGray
+
+    $teArgs = @($testDll)
+
+    if ($warpDllPath) {
+        Write-Host "  WARP_DLL:        $warpDllPath" -ForegroundColor DarkGray
+        $teArgs += "/p:WARP_DLL=$warpDllPath"
+    }
+    else {
+        Write-Host "  WARP_DLL:        (not set -- using system WARP; run download-d3d to fetch the preview)" -ForegroundColor Yellow
+    }
+
+    if ($sdkPath) {
+        Write-Host "  D3D12SDKPath:    $sdkPath" -ForegroundColor DarkGray
+        Write-Host "  D3D12SDKVersion: $D3D12SDKVersion" -ForegroundColor DarkGray
+        $teArgs += "/p:D3D12SDKPath=$sdkPath"
+        $teArgs += "/p:D3D12SDKVersion=$D3D12SDKVersion"
+    }
+    else {
+        Write-Host "  D3D12SDKPath:    (not set -- using inbox D3D12; run download-d3d to fetch the Agility SDK)" -ForegroundColor Yellow
+    }
+
+    # Most execution tests need HlslDataDir to find their shader/data files.
+    # Provide the in-tree default unless the caller already supplied one.
+    if (($TaefArgs -join ' ') -notmatch 'HlslDataDir') {
+        $hlslDataDir = Join-Path $DXCDir "tools\clang\unittests\HLSLExec"
+        if (Test-Path $hlslDataDir) {
+            $teArgs += "/p:HlslDataDir=$hlslDataDir"
+        }
+    }
+
+    if ($TaefArgs -and $TaefArgs.Count -gt 0) {
+        Write-Host "  Extra args:      $($TaefArgs -join ' ')" -ForegroundColor DarkGray
+        $teArgs += $TaefArgs
+    }
+
+    # Run from the bin directory (and prepend it to PATH) so the test DLL's
+    # dependencies -- dxcompiler.dll, dxil.dll, etc. -- resolve.
+    $exit = 0
+    Push-Location $binDir
+    try {
+        $env:Path = "$binDir;$env:Path"
+        Write-Host "  te.exe $($teArgs -join ' ')" -ForegroundColor DarkGray
+        & $te.Source @teArgs
+        $exit = $LASTEXITCODE
+    }
+    finally {
+        Pop-Location
+    }
+
+    if ($exit -ne 0) {
+        Write-Host "`nExecution tests reported failures (te.exe exit code $exit)." -ForegroundColor Red
+    }
+    else {
+        Write-Host "`nExecution tests passed." -ForegroundColor Green
+    }
+}
+
+# -----------------------------------------------------------------------------
 # Help
 # -----------------------------------------------------------------------------
 function Show-Help {
@@ -871,6 +999,7 @@ Commands:
   truncate-history    Truncate submodule history back to depth 2
   update-submodules   Update all submodules to latest upstream
   download-d3d        Download the latest WARP + Agility SDK preview from NuGet
+  run-exec-tests      Run ExecHLSLTests.dll execution tests under TAEF (TE.exe)
   help                Show this help message
 
 Parameters:
@@ -879,6 +1008,10 @@ Parameters:
   -Compiler           cl (default) | clang-cl
   -Target             Specific build target (e.g., clang, dxc, check-all)
   -Repo               Submodule name (for fetch-history / truncate-history)
+  -WarpDll            run-exec-tests: WARP_DLL path (default: download-d3d copy)
+  -D3D12SDKPath       run-exec-tests: Agility SDK dir (default: download-d3d copy)
+  -D3D12SDKVersion    run-exec-tests: D3D12SDKVersion value (default: 1)
+  <extra args>        run-exec-tests: forwarded to TE.exe (e.g. /p:"..." /select:"...")
 
 Examples:
   .\hlsl-dev.ps1 check-prereqs
@@ -892,6 +1025,8 @@ Examples:
   .\hlsl-dev.ps1 fetch-history -Repo llvm-project
   .\hlsl-dev.ps1 truncate-history -Repo DirectXShaderCompiler
   .\hlsl-dev.ps1 download-d3d
+  .\hlsl-dev.ps1 run-exec-tests /p:"ExperimentalShaders=*"
+  .\hlsl-dev.ps1 run-exec-tests /select:"@Name='ExecutionTest::BasicTriangleTest'"
 
 Quickstart:
   1. .\hlsl-dev.ps1 check-prereqs
@@ -922,5 +1057,6 @@ switch ($Command) {
     "truncate-history"  { Invoke-TruncateHistory -RepoName $Repo }
     "update-submodules" { Invoke-UpdateSubmodules }
     "download-d3d"      { Invoke-DownloadDirect3D }
+    "run-exec-tests"    { Invoke-RunExecTests }
     "help"              { Show-Help }
 }
