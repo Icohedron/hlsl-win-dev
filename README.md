@@ -63,6 +63,7 @@ Run `.\hlsl-dev.ps1 check-prereqs` to verify your setup.
 | `fetch-history` | Fetch full git history for a submodule |
 | `truncate-history` | Truncate submodule history to depth 2 |
 | `update-submodules` | Update all submodules to latest upstream |
+| `download-d3d` | Download the latest WARP + Agility SDK preview from NuGet |
 
 ## Parameters
 
@@ -99,6 +100,34 @@ Run `.\hlsl-dev.ps1 check-prereqs` to verify your setup.
 # Truncate it back to save disk space
 .\hlsl-dev.ps1 truncate-history -Repo llvm-project
 ```
+
+## Updating WARP and the Agility SDK
+
+Some tests need a newer software rasterizer or Direct3D 12 runtime than ships
+with Windows. The `download-d3d` task fetches the latest **preview (prerelease)**
+builds of both [WARP](https://www.nuget.org/packages/Microsoft.Direct3D.WARP)
+(the Windows Advanced Rasterization Platform software renderer) and the
+[Direct3D 12 Agility SDK](https://www.nuget.org/packages/Microsoft.Direct3D.D3D12)
+directly from NuGet:
+
+```powershell
+.\hlsl-dev.ps1 download-d3d
+```
+
+This requires only internet access -- no extra tooling. The task uses built-in
+PowerShell (`Invoke-RestMethod` / `Invoke-WebRequest` / `Expand-Archive`) to:
+
+1. Query the NuGet flat-container index for each package and select the newest
+   prerelease version.
+2. Download the `.nupkg`, extract the binaries for your host architecture
+   (`x64`, `arm64`, or `win32`), and place them under `direct3d-preview\`:
+   - `direct3d-preview\WARP\d3d10warp.dll`
+   - `direct3d-preview\D3D12\D3D12Core.dll` (plus `d3d12SDKLayers.dll`, etc.)
+
+Re-run the task at any time to update to the newest preview. The
+`direct3d-preview\` directory is git-ignored. Point your tests at these binaries
+as needed (e.g., copy `d3d10warp.dll` next to your test executable, or set the
+Agility SDK path to the `direct3d-preview\D3D12` folder).
 
 ## Ninja vs Visual Studio Generator
 

@@ -13,7 +13,8 @@
 .PARAMETER Command
     The task to run. One of:
         check-prereqs, setup, configure-llvm, build-llvm, configure-dxc,
-        build-dxc, fetch-history, truncate-history, update-submodules, help
+        build-dxc, fetch-history, truncate-history, update-submodules,
+        download-d3d, help
 
 .PARAMETER BuildType
     CMake build type. Defaults to RelWithDebInfo.
@@ -43,6 +44,7 @@
     .\hlsl-dev.ps1 build-dxc -Generator VS2026
     .\hlsl-dev.ps1 configure-llvm -Compiler cl
     .\hlsl-dev.ps1 fetch-history -Repo llvm-project
+    .\hlsl-dev.ps1 download-d3d
 #>
 
 [CmdletBinding()]
@@ -53,6 +55,7 @@ param(
         "configure-llvm", "build-llvm",
         "configure-dxc", "build-dxc",
         "fetch-history", "truncate-history", "update-submodules",
+        "download-d3d",
         "help"
     )]
     [string]$Command = "help",
@@ -83,6 +86,7 @@ $LLVMDir   = Join-Path $ScriptDir "llvm-project"
 $DXCDir    = Join-Path $ScriptDir "DirectXShaderCompiler"
 $OffloadTestDir   = Join-Path $ScriptDir "offload-test-suite"
 $GoldenImagesDir  = Join-Path $ScriptDir "offload-golden-images"
+$Direct3DPreviewDir = Join-Path $ScriptDir "direct3d-preview"
 
 # -----------------------------------------------------------------------------
 # Git-for-Windows Bash / Unix Tools
@@ -736,6 +740,117 @@ function Invoke-BuildDXC {
 }
 
 # -----------------------------------------------------------------------------
+# Direct3D Preview Download (WARP + Agility SDK from NuGet)
+# -----------------------------------------------------------------------------
+# The newest preview builds of WARP (the Windows Advanced Rasterization
+# Platform software renderer) and the Direct3D 12 Agility SDK are published to
+# NuGet as prerelease packages, ahead of any stable release. The download-d3d
+# task fetches the latest prerelease of each, extracts the binaries for the
+# host architecture, and lays them out under direct3d-preview\ so tests can run
+# against bleeding-edge WARP and the Agility SDK runtime.
+
+# Map the host processor architecture onto the NuGet package's bin\<arch> name.
+function Get-HostNuGetArch {
+    $arch = $env:PROCESSOR_ARCHITECTURE
+    if ($env:PROCESSOR_ARCHITEW6432) { $arch = $env:PROCESSOR_ARCHITEW6432 }
+    switch ($arch.ToUpperInvariant()) {
+        "AMD64" { return "x64" }
+        "ARM64" { return "arm64" }
+        "X86"   { return "win32" }
+        default { throw "Unsupported host architecture for Direct3D NuGet packages: $arch" }
+    }
+}
+
+# Query the NuGet flat-container index for a package and return its newest
+# prerelease (preview) version. NuGet returns versions in ascending SemVer
+# order, so the last prerelease entry is the latest.
+function Get-LatestNuGetPrerelease {
+    param([string]$PackageId)
+
+    $idLower = $PackageId.ToLowerInvariant()
+    $indexUrl = "https://api.nuget.org/v3-flatcontainer/$idLower/index.json"
+    try {
+        $index = Invoke-RestMethod -Uri $indexUrl
+    }
+    catch {
+        throw "Failed to query NuGet for $PackageId ($indexUrl): $($_.Exception.Message)"
+    }
+
+    $prerelease = @($index.versions | Where-Object { $_ -match '-' })
+    if (-not $prerelease -or $prerelease.Count -eq 0) {
+        throw "No prerelease (preview) versions found on NuGet for $PackageId."
+    }
+    return $prerelease[-1]
+}
+
+# Download a NuGet package, extract its build\native\bin\<arch> binaries, and
+# copy them into $DestDir (which is recreated fresh on each run).
+function Install-Direct3DNuGetPackage {
+    param(
+        [string]$PackageId,
+        [string]$Version,
+        [string]$DestDir,
+        [string]$NuGetArch
+    )
+
+    $idLower  = $PackageId.ToLowerInvariant()
+    $nupkgUrl = "https://api.nuget.org/v3-flatcontainer/$idLower/$Version/$idLower.$Version.nupkg"
+
+    $staging = Join-Path ([System.IO.Path]::GetTempPath()) ("direct3d-" + [System.Guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path $staging | Out-Null
+    try {
+        $nupkg = Join-Path $staging "$idLower.zip"
+        Write-Host "  [nuget] Downloading $PackageId $Version ..." -ForegroundColor DarkGray
+        Invoke-WebRequest -Uri $nupkgUrl -OutFile $nupkg
+
+        $extracted = Join-Path $staging "extracted"
+        Expand-Archive -Path $nupkg -DestinationPath $extracted -Force
+
+        $archDir = Join-Path $extracted "build\native\bin\$NuGetArch"
+        if (-not (Test-Path $archDir)) {
+            throw "$PackageId $Version does not contain binaries for '$NuGetArch' (expected build\native\bin\$NuGetArch)."
+        }
+
+        if (Test-Path $DestDir) { Remove-Item -Recurse -Force $DestDir }
+        New-Item -ItemType Directory -Path $DestDir | Out-Null
+        Copy-Item -Path (Join-Path $archDir "*") -Destination $DestDir -Recurse -Force
+    }
+    finally {
+        Remove-Item -Recurse -Force $staging -ErrorAction SilentlyContinue
+    }
+}
+
+function Invoke-DownloadDirect3D {
+    Write-Host "`n=== Downloading Latest Direct3D Preview (WARP + Agility SDK) from NuGet ===" -ForegroundColor Cyan
+
+    $nugetArch = Get-HostNuGetArch
+    Write-Host "  Host architecture: $nugetArch" -ForegroundColor DarkGray
+
+    $packages = @(
+        @{ Id = "Microsoft.Direct3D.WARP";  Label = "WARP";        Dest = (Join-Path $Direct3DPreviewDir "WARP");  Key = "d3d10warp.dll" },
+        @{ Id = "Microsoft.Direct3D.D3D12"; Label = "Agility SDK"; Dest = (Join-Path $Direct3DPreviewDir "D3D12"); Key = "D3D12Core.dll" }
+    )
+
+    foreach ($pkg in $packages) {
+        $version = Get-LatestNuGetPrerelease -PackageId $pkg.Id
+        Write-Host "  [$($pkg.Label)] Latest preview: $($pkg.Id) $version" -ForegroundColor Green
+        Install-Direct3DNuGetPackage -PackageId $pkg.Id -Version $version -DestDir $pkg.Dest -NuGetArch $nugetArch
+    }
+
+    Write-Host ""
+    Write-Host "Direct3D preview binaries downloaded to $Direct3DPreviewDir" -ForegroundColor Green
+    foreach ($pkg in $packages) {
+        $keyPath = Join-Path $pkg.Dest $pkg.Key
+        if (Test-Path $keyPath) {
+            Write-Host "  $($pkg.Label): $keyPath" -ForegroundColor Green
+        }
+        else {
+            Write-Host "  $($pkg.Label): $($pkg.Key) not found under $($pkg.Dest)" -ForegroundColor Yellow
+        }
+    }
+}
+
+# -----------------------------------------------------------------------------
 # Help
 # -----------------------------------------------------------------------------
 function Show-Help {
@@ -755,6 +870,7 @@ Commands:
   fetch-history       Fetch full git history for a submodule
   truncate-history    Truncate submodule history back to depth 2
   update-submodules   Update all submodules to latest upstream
+  download-d3d        Download the latest WARP + Agility SDK preview from NuGet
   help                Show this help message
 
 Parameters:
@@ -775,6 +891,7 @@ Examples:
   .\hlsl-dev.ps1 configure-llvm -Compiler cl
   .\hlsl-dev.ps1 fetch-history -Repo llvm-project
   .\hlsl-dev.ps1 truncate-history -Repo DirectXShaderCompiler
+  .\hlsl-dev.ps1 download-d3d
 
 Quickstart:
   1. .\hlsl-dev.ps1 check-prereqs
@@ -804,5 +921,6 @@ switch ($Command) {
     "fetch-history"     { Invoke-FetchHistory -RepoName $Repo }
     "truncate-history"  { Invoke-TruncateHistory -RepoName $Repo }
     "update-submodules" { Invoke-UpdateSubmodules }
+    "download-d3d"      { Invoke-DownloadDirect3D }
     "help"              { Show-Help }
 }
