@@ -648,6 +648,63 @@ function Invoke-TruncateHistory {
 }
 
 # -----------------------------------------------------------------------------
+# Stale Compiler Cache Detection
+# -----------------------------------------------------------------------------
+function Test-CachedCompilerStale {
+    <#
+    .SYNOPSIS
+        Checks whether an existing CMakeCache.txt references an MSVC compiler
+        path that no longer exists on disk. Returns $true if the cache is stale
+        and should be removed before reconfiguring.
+    .DESCRIPTION
+        After a Visual Studio update the MSVC toolchain version directory changes
+        (e.g. 14.50.35717 -> 14.51.36231). The old path baked into CMakeCache.txt
+        becomes invalid. CMake will error out even if a new -DCMAKE_C_COMPILER is
+        passed because the cached value takes precedence.
+
+        Only triggers for paths that look like MSVC toolchain directories
+        (contain VC\Tools\MSVC\). Other compilers (clang-cl, gcc) are not
+        affected by VS version rotation and are left alone.
+    #>
+    param([string]$BuildDir)
+
+    $cache = Join-Path $BuildDir "CMakeCache.txt"
+    if (-not (Test-Path $cache)) { return $false }
+
+    $content = Get-Content $cache -Raw
+    if ($content -match 'CMAKE_C_COMPILER:FILEPATH=(.+)') {
+        $cachedPath = $Matches[1].Trim()
+        # Only act on MSVC toolchain paths — these rotate with VS updates
+        if ($cachedPath -match 'VC\\Tools\\MSVC\\' -and -not (Test-Path $cachedPath)) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Remove-StaleCMakeCache {
+    <#
+    .SYNOPSIS
+        If the CMake cache references a compiler that no longer exists (e.g. after
+        a VS update), removes CMakeCache.txt and the CMakeFiles directory so that
+        the next configure starts fresh.
+    #>
+    param([string]$BuildDir, [string]$ProjectName = "project")
+
+    if (Test-CachedCompilerStale -BuildDir $BuildDir) {
+        $cache = Join-Path $BuildDir "CMakeCache.txt"
+        $content = Get-Content $cache -Raw
+        $stale = if ($content -match 'CMAKE_C_COMPILER:FILEPATH=(.+)') { $Matches[1].Trim() } else { "unknown" }
+        Write-Host "  [stale cache] MSVC toolchain changed — cached compiler no longer exists:" -ForegroundColor Yellow
+        Write-Host "    $stale" -ForegroundColor DarkYellow
+        Write-Host "  Removing CMakeCache.txt for $ProjectName to force a clean reconfigure." -ForegroundColor Yellow
+        Remove-Item $cache -Force
+        $cmakeFiles = Join-Path $BuildDir "CMakeFiles"
+        if (Test-Path $cmakeFiles) { Remove-Item $cmakeFiles -Recurse -Force }
+    }
+}
+
+# -----------------------------------------------------------------------------
 # Configure & Build: LLVM
 # -----------------------------------------------------------------------------
 function Invoke-ConfigureLLVM {
@@ -658,6 +715,8 @@ function Invoke-ConfigureLLVM {
         Write-Host "Error: LLVM source not found at $sourceDir. Run '.\hlsl-dev.ps1 setup' first." -ForegroundColor Red
         return
     }
+
+    Remove-StaleCMakeCache -BuildDir $buildDir -ProjectName "LLVM"
 
     Write-Host "`n=== Configuring LLVM ($BuildType, $(Get-CMakeGenerator), $Compiler) ===" -ForegroundColor Cyan
 
@@ -682,6 +741,9 @@ function Invoke-ConfigureLLVM {
 
 function Invoke-BuildLLVM {
     $buildDir = Join-Path $LLVMDir "build"
+
+    # Auto-reconfigure if MSVC toolchain changed (e.g. after a VS update)
+    Remove-StaleCMakeCache -BuildDir $buildDir -ProjectName "LLVM"
 
     # Auto-configure if build directory is missing
     if (-not (Test-Path (Join-Path $buildDir "CMakeCache.txt"))) {
@@ -719,6 +781,8 @@ function Invoke-ConfigureDXC {
 
     $buildDir = Join-Path $DXCDir "build"
 
+    Remove-StaleCMakeCache -BuildDir $buildDir -ProjectName "DXC"
+
     Write-Host "`n=== Configuring DXC ($BuildType, $(Get-CMakeGenerator), $Compiler) ===" -ForegroundColor Cyan
 
     $cmakeArgs = @(
@@ -742,6 +806,9 @@ function Invoke-ConfigureDXC {
 
 function Invoke-BuildDXC {
     $buildDir = Join-Path $DXCDir "build"
+
+    # Auto-reconfigure if MSVC toolchain changed (e.g. after a VS update)
+    Remove-StaleCMakeCache -BuildDir $buildDir -ProjectName "DXC"
 
     # Auto-configure if build directory is missing
     if (-not (Test-Path (Join-Path $buildDir "CMakeCache.txt"))) {
