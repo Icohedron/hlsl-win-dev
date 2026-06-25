@@ -198,11 +198,10 @@ function Test-IsMultiConfigGenerator {
 function Initialize-VCEnvironment {
     <#
     .SYNOPSIS
-        Ensures the MSVC x64 toolchain is on PATH. When the current Developer
-        Command Prompt targets x86 (or no VS environment is loaded at all),
-        this function sources vcvarsall.bat for the amd64 host/target so that
-        cl.exe, link.exe, and the Windows SDK libraries all resolve to their
-        x64 variants.
+        Ensures the MSVC native toolchain is on PATH. Detects the host
+        architecture (ARM64 or x64) and sources vcvarsall.bat with the
+        matching target so that cl.exe, link.exe, and the Windows SDK
+        libraries all resolve to their native variants.
 
         For Visual Studio generators this is unnecessary because CMake selects
         the platform through -A, but for single-config generators like Ninja
@@ -216,13 +215,26 @@ function Initialize-VCEnvironment {
     # but the detection below (looking for cl.exe) works because the VS
     # Developer Command Prompt always puts cl.exe on PATH too.
 
-    # Quick check: is the current cl.exe already targeting x64?
+    # Determine the native host architecture for vcvarsall.bat.
+    # On ARM64 Windows we want "arm64"; on x64 we want "amd64".
+    $hostArch = switch ($env:PROCESSOR_ARCHITECTURE) {
+        "ARM64" { "arm64" }
+        "AMD64" { "amd64" }
+        default { "amd64" }
+    }
+    # The cl.exe banner pattern that confirms the correct native target.
+    $nativePattern = switch ($hostArch) {
+        "arm64" { 'for (ARM64|arm64)' }
+        "amd64" { 'for (x64|AMD64)' }
+    }
+
+    # Quick check: is the current cl.exe already targeting the native arch?
     $cl = Get-Command cl -ErrorAction SilentlyContinue
     if ($cl) {
         $clOutput = (cmd /c "`"$($cl.Source)`" 2>&1")
         $clBanner = $clOutput -join " "
-        if ($clBanner -match 'for (x64|AMD64)') {
-            # Already in an x64 environment -- nothing to do.
+        if ($clBanner -match $nativePattern) {
+            # Already in a matching native environment -- nothing to do.
             return
         }
     }
@@ -231,9 +243,9 @@ function Initialize-VCEnvironment {
     $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
     if (-not (Test-Path $vswhere)) {
         if (-not $cl) {
-            throw "cl.exe not found and vswhere is not installed. Run from a Visual Studio x64 Developer PowerShell."
+            throw "cl.exe not found and vswhere is not installed. Run from a Visual Studio Developer PowerShell."
         }
-        Write-Host "  [env] Warning: vswhere not found; using current (non-x64) environment as-is." -ForegroundColor Yellow
+        Write-Host "  [env] Warning: vswhere not found; using current environment as-is." -ForegroundColor Yellow
         return
     }
 
@@ -254,13 +266,13 @@ function Initialize-VCEnvironment {
         return
     }
 
-    Write-Host "  [env] Current toolchain is not x64 -- sourcing vcvarsall.bat amd64 ..." -ForegroundColor Yellow
+    Write-Host "  [env] Sourcing vcvarsall.bat $hostArch ..." -ForegroundColor Yellow
 
     # Run vcvarsall in a child cmd, then dump the resulting environment so we
     # can import it into this PowerShell session.
-    $envDump = & cmd.exe /c "`"$vcvarsall`" amd64 >nul 2>&1 && set" 2>&1
+    $envDump = & cmd.exe /c "`"$vcvarsall`" $hostArch >nul 2>&1 && set" 2>&1
     if ($LASTEXITCODE -ne 0) {
-        throw "vcvarsall.bat amd64 failed (exit code $LASTEXITCODE)."
+        throw "vcvarsall.bat $hostArch failed (exit code $LASTEXITCODE)."
     }
 
     foreach ($line in $envDump) {
@@ -269,7 +281,7 @@ function Initialize-VCEnvironment {
         }
     }
 
-    Write-Host "  [env] x64 MSVC environment loaded." -ForegroundColor Green
+    Write-Host "  [env] $($hostArch.ToUpper()) MSVC environment loaded." -ForegroundColor Green
 }
 
 # -----------------------------------------------------------------------------
@@ -389,6 +401,21 @@ function Test-Prerequisites {
     Write-Host "`n=== Checking Prerequisites ===" -ForegroundColor Cyan
 
     $allGood = $true
+
+    # Source the MSVC environment so VS-bundled tools (cmake, ninja,
+    # clang-cl) are visible on PATH even from a plain PowerShell window.
+    # We bypass Initialize-VCEnvironment's generator guard because check-prereqs
+    # always wants to verify tool availability regardless of generator choice.
+    $savedGenerator = $Generator
+    try {
+        $script:Generator = "Ninja"   # Force past the multi-config early return
+        Initialize-VCEnvironment
+    } catch {
+        # Non-fatal here -- individual tool checks below will report what's
+        # missing. This just means we couldn't auto-discover VS tools.
+    } finally {
+        $script:Generator = $savedGenerator
+    }
 
     # Git
     $git = Get-Command git -ErrorAction SilentlyContinue

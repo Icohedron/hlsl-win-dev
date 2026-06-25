@@ -345,12 +345,44 @@ if (Test-Path $d3d12LayersDll) {
     Write-Host "  [OK] Graphics Tools already installed" -ForegroundColor Green
 }
 else {
-    & dism /Online /Add-Capability /CapabilityName:Tools.Graphics.DirectX~~~~0.0.1.0 /NoRestart
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "  [FAILED] Graphics Tools -- dism exited with code $LASTEXITCODE" -ForegroundColor Red
-        $Failed += "Graphics Tools"
+    $capName = "Tools.Graphics.DirectX~~~~0.0.1.0"
+
+    # Try Add-WindowsCapability first (better error messages than dism.exe).
+    $installed = $false
+    try {
+        $cap = Get-WindowsCapability -Online -Name $capName -ErrorAction Stop
+        if ($cap.State -eq "Installed") {
+            $installed = $true
+        }
+        elseif ($cap.State -eq "NotPresent") {
+            Add-WindowsCapability -Online -Name $capName -ErrorAction Stop | Out-Null
+            $installed = $true
+        }
+        else {
+            Write-Host "  Capability state: $($cap.State) -- falling back to DISM" -ForegroundColor Yellow
+        }
     }
-    else {
+    catch {
+        Write-Host "  Add-WindowsCapability failed: $_" -ForegroundColor Yellow
+        Write-Host "  Falling back to DISM..." -ForegroundColor Yellow
+    }
+
+    # Fallback: dism.exe directly (works on editions where the PowerShell
+    # cmdlet may not be available or where the source must be online).
+    if (-not $installed) {
+        & dism /Online /Add-Capability /CapabilityName:$capName /NoRestart
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "  [FAILED] Graphics Tools -- dism exited with code $LASTEXITCODE" -ForegroundColor Red
+            Write-Host "           If your system uses WSUS, you may need to download the FOD ISO" -ForegroundColor Red
+            Write-Host "           and run: dism /Online /Add-Capability /CapabilityName:$capName /Source:<path> /NoRestart" -ForegroundColor Red
+            $Failed += "Graphics Tools"
+        }
+        else {
+            $installed = $true
+        }
+    }
+
+    if ($installed) {
         Write-Host "  [OK] Graphics Tools" -ForegroundColor Green
     }
 }
