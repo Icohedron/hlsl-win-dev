@@ -193,16 +193,32 @@ function Test-IsMultiConfigGenerator {
 }
 
 # -----------------------------------------------------------------------------
-# MSVC x64 Environment Bootstrapping
+# Host Architecture
+# -----------------------------------------------------------------------------
+function Get-HostProcessorArchitecture {
+    $arch = $env:PROCESSOR_ARCHITECTURE
+    if ($env:PROCESSOR_ARCHITEW6432) { $arch = $env:PROCESSOR_ARCHITEW6432 }
+    if (-not $arch) { throw "Unable to detect the host processor architecture." }
+
+    switch ($arch.ToUpperInvariant()) {
+        "AMD64" { return "AMD64" }
+        "ARM64" { return "ARM64" }
+        "X86"   { return "X86" }
+        default { throw "Unsupported host processor architecture: $arch" }
+    }
+}
+
+# -----------------------------------------------------------------------------
+# MSVC Environment Bootstrapping
 # -----------------------------------------------------------------------------
 function Initialize-VCEnvironment {
     <#
     .SYNOPSIS
-        Ensures the MSVC x64 toolchain is on PATH. When the current Developer
+        Ensures the native MSVC toolchain is on PATH. When the current Developer
         Command Prompt targets x86 (or no VS environment is loaded at all),
-        this function sources vcvarsall.bat for the amd64 host/target so that
+        this function sources vcvarsall.bat for the native host architecture so
         cl.exe, link.exe, and the Windows SDK libraries all resolve to their
-        x64 variants.
+        native variants.
 
         For Visual Studio generators this is unnecessary because CMake selects
         the platform through -A, but for single-config generators like Ninja
@@ -216,13 +232,32 @@ function Initialize-VCEnvironment {
     # but the detection below (looking for cl.exe) works because the VS
     # Developer Command Prompt always puts cl.exe on PATH too.
 
-    # Quick check: is the current cl.exe already targeting x64?
+    $hostArch = Get-HostProcessorArchitecture
+    switch ($hostArch) {
+        "AMD64" {
+            $vcvarsArch = "amd64"
+            $compilerArchPattern = 'for (x64|AMD64)'
+            $displayArch = "x64"
+            $vcToolsComponent = "Microsoft.VisualStudio.Component.VC.Tools.x86.x64"
+        }
+        "ARM64" {
+            $vcvarsArch = "arm64"
+            $compilerArchPattern = 'for ARM64'
+            $displayArch = "ARM64"
+            $vcToolsComponent = "Microsoft.VisualStudio.Component.VC.Tools.ARM64"
+        }
+        default {
+            throw "Native MSVC builds are not supported on $hostArch hosts."
+        }
+    }
+
+    # Quick check: is the current cl.exe already targeting the host architecture?
     $cl = Get-Command cl -ErrorAction SilentlyContinue
     if ($cl) {
         $clOutput = (cmd /c "`"$($cl.Source)`" 2>&1")
         $clBanner = $clOutput -join " "
-        if ($clBanner -match 'for (x64|AMD64)') {
-            # Already in an x64 environment -- nothing to do.
+        if ($clBanner -match $compilerArchPattern) {
+            # Already in a native environment -- nothing to do.
             return
         }
     }
@@ -231,14 +266,14 @@ function Initialize-VCEnvironment {
     $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
     if (-not (Test-Path $vswhere)) {
         if (-not $cl) {
-            throw "cl.exe not found and vswhere is not installed. Run from a Visual Studio x64 Developer PowerShell."
+            throw "cl.exe not found and vswhere is not installed. Run from a Visual Studio $displayArch Developer PowerShell."
         }
-        Write-Host "  [env] Warning: vswhere not found; using current (non-x64) environment as-is." -ForegroundColor Yellow
+        Write-Host "  [env] Warning: vswhere not found; using current (non-$displayArch) environment as-is." -ForegroundColor Yellow
         return
     }
 
     $vsInstallPath = & $vswhere -latest -products * `
-        -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+        -requires $vcToolsComponent `
         -property installationPath
     if (-not $vsInstallPath) {
         if (-not $cl) {
@@ -254,13 +289,13 @@ function Initialize-VCEnvironment {
         return
     }
 
-    Write-Host "  [env] Current toolchain is not x64 -- sourcing vcvarsall.bat amd64 ..." -ForegroundColor Yellow
+    Write-Host "  [env] Current toolchain is not $displayArch -- sourcing vcvarsall.bat $vcvarsArch ..." -ForegroundColor Yellow
 
     # Run vcvarsall in a child cmd, then dump the resulting environment so we
     # can import it into this PowerShell session.
-    $envDump = & cmd.exe /c "`"$vcvarsall`" amd64 >nul 2>&1 && set" 2>&1
+    $envDump = & cmd.exe /c "`"$vcvarsall`" $vcvarsArch >nul 2>&1 && set" 2>&1
     if ($LASTEXITCODE -ne 0) {
-        throw "vcvarsall.bat amd64 failed (exit code $LASTEXITCODE)."
+        throw "vcvarsall.bat $vcvarsArch failed (exit code $LASTEXITCODE)."
     }
 
     foreach ($line in $envDump) {
@@ -269,7 +304,7 @@ function Initialize-VCEnvironment {
         }
     }
 
-    Write-Host "  [env] x64 MSVC environment loaded." -ForegroundColor Green
+    Write-Host "  [env] $displayArch MSVC environment loaded." -ForegroundColor Green
 }
 
 # -----------------------------------------------------------------------------
@@ -282,7 +317,7 @@ function Get-CompilerCMakeFlags {
         based on the -Compiler parameter (clang-cl or cl).
     #>
 
-    # Ensure the x64 MSVC environment is active before resolving the compiler.
+    # Ensure the native MSVC environment is active before resolving the compiler.
     Initialize-VCEnvironment
 
     switch ($Compiler) {
@@ -372,8 +407,14 @@ function Get-DXCCMakeFlags {
 # -----------------------------------------------------------------------------
 # Each entry maps a vswhere-queryable component ID to a human-readable name.
 # These must stay in sync with $VSComponents in install-deps.ps1.
+$hostVCComponent = switch (Get-HostProcessorArchitecture) {
+    "AMD64" { @{ Id = "Microsoft.VisualStudio.Component.VC.Tools.x86.x64"; Name = "MSVC x86/x64 build tools" } }
+    "ARM64" { @{ Id = "Microsoft.VisualStudio.Component.VC.Tools.ARM64"; Name = "MSVC ARM64 build tools" } }
+    default { @{ Id = "Microsoft.VisualStudio.Component.VC.Tools.x86.x64"; Name = "MSVC x86/x64 build tools" } }
+}
+
 $RequiredVSComponents = @(
-    @{ Id = "Microsoft.VisualStudio.Component.VC.Tools.x86.x64";   Name = "MSVC x86/x64 build tools" },
+    $hostVCComponent,
     @{ Id = "Microsoft.VisualStudio.Component.VC.CMake.Project";    Name = "C++ CMake tools for Windows" },
     @{ Id = "Microsoft.VisualStudio.Component.VC.Llvm.Clang";      Name = "C++ Clang tools for Windows" },
     @{ Id = "Microsoft.VisualStudio.Component.VC.Llvm.ClangToolset"; Name = "C++ Clang-cl MSBuild toolset" },
@@ -780,9 +821,8 @@ function Invoke-BuildDXC {
 
 # Map the host processor architecture onto the NuGet package's bin\<arch> name.
 function Get-HostNuGetArch {
-    $arch = $env:PROCESSOR_ARCHITECTURE
-    if ($env:PROCESSOR_ARCHITEW6432) { $arch = $env:PROCESSOR_ARCHITEW6432 }
-    switch ($arch.ToUpperInvariant()) {
+    $arch = Get-HostProcessorArchitecture
+    switch ($arch) {
         "AMD64" { return "x64" }
         "ARM64" { return "arm64" }
         "X86"   { return "win32" }
