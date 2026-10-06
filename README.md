@@ -20,7 +20,7 @@ Unlike hlsl-dev, Windows has no Nix equivalent, so this repo cannot offer the sa
   - C++ ATL for latest build tools (`Microsoft.VisualStudio.Component.VC.ATL`)
   - Windows 11 SDK 10.0.26100 (`Microsoft.VisualStudio.Component.Windows11SDK.26100`)
   - Windows Driver Kit Visual Studio integration (`Component.Microsoft.Windows.DriverKit`)
-  - TAEF (`Microsoft.Taef`) from NuGet. `install-deps.ps1` adds the host-architecture `build\Binaries\<arch>` directory to the machine PATH so `TE.exe` is directly runnable.
+  - TAEF (`Microsoft.Taef`) from NuGet. `install-deps.ps1` sets `TAEF_PATH` to the host-architecture `build\Binaries\<arch>` directory so CMake can discover the package, and adds that directory to the machine PATH so `TE.exe` is directly runnable.
 - **Python 3.x** (`pip install pyyaml` for LIT tests)
 - **Git** -- Git-for-Windows' unix tools (`usr\bin`: bash, grep, sed, diff, etc.) must be on PATH for LLVM LIT tests. `install-deps.ps1` configures this automatically.
 - **Vulkan SDK** (<https://vulkan.lunarg.com/sdk/home>)

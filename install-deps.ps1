@@ -7,7 +7,9 @@
 .DESCRIPTION
     Uses winget and NuGet to install every prerequisite for building LLVM
     (with HLSL support) and DirectXShaderCompiler on Windows.  Packages are
-    installed machine-wide.
+    installed machine-wide. Disables Windows Smart App Control so locally
+    built developer tools are not blocked; a restart is required when this
+    setting changes.
 
     Must be run from an elevated (Administrator) PowerShell session.
 
@@ -65,6 +67,34 @@ $Packages = @(
 Write-Host "`n=== Installing HLSL Dev Dependencies ===" -ForegroundColor Cyan
 
 $Failed = @()
+$RestartRequired = $false
+
+# -----------------------------------------------------------------------------
+# Disable Windows Smart App Control
+# -----------------------------------------------------------------------------
+Write-Host "`n--- Windows Smart App Control ---" -ForegroundColor Cyan
+
+$SmartAppControlPolicyPath = "HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy"
+$SmartAppControlValueName = "VerifiedAndReputablePolicyState"
+$SmartAppControlState = Get-ItemPropertyValue -Path $SmartAppControlPolicyPath `
+    -Name $SmartAppControlValueName -ErrorAction SilentlyContinue
+
+if ($SmartAppControlState -eq 0) {
+    Write-Host "  [OK] Smart App Control already disabled" -ForegroundColor Green
+}
+else {
+    New-ItemProperty -Path $SmartAppControlPolicyPath -Name $SmartAppControlValueName `
+        -PropertyType DWord -Value 0 -Force | Out-Null
+
+    $SmartAppControlState = Get-ItemPropertyValue -Path $SmartAppControlPolicyPath `
+        -Name $SmartAppControlValueName
+    if ($SmartAppControlState -ne 0) {
+        throw "Failed to disable Smart App Control."
+    }
+
+    $RestartRequired = $true
+    Write-Host "  [OK] Smart App Control disabled (restart required)" -ForegroundColor Green
+}
 
 # -----------------------------------------------------------------------------
 # Visual Studio 2026 Community (with required workloads and components)
@@ -312,12 +342,14 @@ else {
 }
 
 # -----------------------------------------------------------------------------
-# Post-install: Add TAEF (TE.exe) to the system PATH
+# Post-install: Configure TAEF for CMake and direct TE.exe use
 # -----------------------------------------------------------------------------
 # The DXC HLSL test suite drives TAEF via TE.exe.  The Microsoft.Taef NuGet
-# package ships architecture-specific binaries under build\Binaries, so add
-# the host architecture's directory for direct command-line use.
-Write-Host "`n--- TAEF PATH (TE.exe) ---" -ForegroundColor Cyan
+# package ships architecture-specific binaries under build\Binaries. Set
+# TAEF_PATH to the host architecture's directory so FindTAEF.cmake can derive
+# the package's Include and Library directories, and add it to PATH so TE.exe
+# is directly runnable.
+Write-Host "`n--- TAEF environment (CMake and TE.exe) ---" -ForegroundColor Cyan
 
 $TAEFDir = $null
 
@@ -334,6 +366,16 @@ foreach ($taefPackage in $taefPackages) {
 }
 
 if ($TAEFDir) {
+    $machineTAEFPath = [System.Environment]::GetEnvironmentVariable("TAEF_PATH", "Machine")
+    if ($machineTAEFPath -eq $TAEFDir) {
+        Write-Host "  [OK] TAEF_PATH already set to $TAEFDir" -ForegroundColor Green
+    }
+    else {
+        [System.Environment]::SetEnvironmentVariable("TAEF_PATH", $TAEFDir, "Machine")
+        Write-Host "  [OK] Set TAEF_PATH to $TAEFDir" -ForegroundColor Green
+    }
+    $env:TAEF_PATH = $TAEFDir
+
     $machPath = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
     $normalizedEntries = $machPath -split ";" | ForEach-Object { $_.TrimEnd("\").ToLowerInvariant() }
     $normalizedTAEF = $TAEFDir.TrimEnd("\").ToLowerInvariant()
@@ -414,8 +456,9 @@ else {
 Write-Host @"
 
 Next steps:
-  1. Open a new terminal so PATH entries take effect in other shells.
-  2. Run .\hlsl-dev.ps1 check-prereqs to verify everything is ready.
+  1. $(if ($RestartRequired) { "Restart Windows to apply the Smart App Control change." } else { "Open a new terminal so PATH entries take effect in other shells." })
+  2. $(if ($RestartRequired) { "Open a new terminal so PATH entries take effect in other shells." } else { "Run .\hlsl-dev.ps1 check-prereqs to verify everything is ready." })
+  $(if ($RestartRequired) { "3. Run .\hlsl-dev.ps1 check-prereqs to verify everything is ready." })
 
 "@ -ForegroundColor White
 
