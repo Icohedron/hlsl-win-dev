@@ -2,13 +2,12 @@
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-    Installs all HLSL Developer Environment dependencies via Chocolatey.
+    Installs all HLSL Developer Environment dependencies via winget.
 
 .DESCRIPTION
-    Uses Chocolatey to install every prerequisite for building LLVM (with
-    HLSL support) and DirectXShaderCompiler on Windows.  Chocolatey itself is
-    installed first if it is not already present, then all remaining
-    packages are installed system-wide.
+    Uses winget to install every prerequisite for building LLVM (with HLSL
+    support) and DirectXShaderCompiler on Windows.  All packages are installed
+    with --scope machine so they are available system-wide.
 
     Must be run from an elevated (Administrator) PowerShell session.
 
@@ -29,28 +28,15 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 # -----------------------------------------------------------------------------
-# Ensure Chocolatey is installed
+# Verify winget is available
 # -----------------------------------------------------------------------------
-$choco = Get-Command choco -ErrorAction SilentlyContinue
-if (-not $choco) {
-    Write-Host "Chocolatey not found -- installing Chocolatey..." -ForegroundColor Cyan
-    Set-ExecutionPolicy Bypass -Scope Process -Force
-    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
-    Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
-
-    # Refresh PATH so the newly-installed choco.exe is visible in this session.
-    $MachinePath = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
-    $UserPath    = [System.Environment]::GetEnvironmentVariable("Path", "User")
-    $env:Path    = "$MachinePath;$UserPath"
-
-    $choco = Get-Command choco -ErrorAction SilentlyContinue
-    if (-not $choco) {
-        throw "Chocolatey installation failed -- choco is still not available."
-    }
+$winget = Get-Command winget -ErrorAction SilentlyContinue
+if (-not $winget) {
+    throw "winget is not available. Install App Installer from the Microsoft Store or update Windows."
 }
 
-$chocoVer = (& choco --version 2>&1)
-Write-Host "Using Chocolatey $chocoVer" -ForegroundColor Cyan
+$wingetVer = (& winget --version 2>&1)
+Write-Host "Using winget $wingetVer" -ForegroundColor Cyan
 
 # -----------------------------------------------------------------------------
 # Package list
@@ -61,17 +47,17 @@ $VSComponents = @(
     "Microsoft.VisualStudio.Component.VC.CMake.Project",          # C++ CMake tools for Windows (CMake, Ninja)
     "Microsoft.VisualStudio.Component.VC.Llvm.Clang",             # C++ Clang tools for Windows
     "Microsoft.VisualStudio.Component.VC.Llvm.ClangToolset",      # MSBuild support for LLVM (clang-cl) toolset
-    "Microsoft.VisualStudio.Component.VC.ATL",                    # C++ ATL for x64/x86 (Latest MSVC)
-    "Microsoft.VisualStudio.Component.VC.ATL.ARM64",              # C++ ATL for ARM64 (Latest MSVC)
-    "Component.Microsoft.Windows.DriverKit"                       # Windows Driver Kit (includes TAEF)
+    "Microsoft.VisualStudio.Component.Windows11SDK.26100",         # Windows 11 SDK (10.0.26100)
+    "Microsoft.VisualStudio.Component.VC.ATL",                     # C++ ATL for x64/x86 (Latest MSVC)
+    "Component.Microsoft.Windows.DriverKit"                        # Windows Driver Kit (includes TAEF)
 )
 
 $Packages = @(
-    @{ Id = "git";                   Name = "Git" },
-    @{ Id = "vulkan-sdk";             Name = "Vulkan SDK" },
-    @{ Id = "python314";              Name = "Python 3.14" },
-    @{ Id = "sccache";                Name = "sccache" },
-    @{ Id = "windowsdriverkit11";     Name = "Windows Driver Kit 11" }
+    @{ Id = "Microsoft.Git";                        Name = "Git" },
+    @{ Id = "KhronosGroup.VulkanSDK";               Name = "Vulkan SDK" },
+    @{ Id = "Python.Python.3.14";                   Name = "Python 3.14" },
+    @{ Id = "Mozilla.sccache";                      Name = "sccache" },
+    @{ Id = "Microsoft.WindowsWDK.10.0.26100";      Name = "Windows Driver Kit - Windows 10.0.26100.6584" }
 )
 
 # -----------------------------------------------------------------------------
@@ -98,9 +84,10 @@ if (Test-Path $vswhere) {
 
 if (-not $vsInstallPath) {
     Write-Host "  Installing Visual Studio 2026 Community..." -ForegroundColor DarkGray
-    & choco install visualstudio2026community -y --no-progress
+    & winget install --id Microsoft.VisualStudio.Community --scope machine `
+        --accept-source-agreements --accept-package-agreements
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "  [FAILED] Visual Studio 2026 Community -- choco exited with code $LASTEXITCODE" -ForegroundColor Red
+        Write-Host "  [FAILED] Visual Studio 2026 Community -- winget exited with code $LASTEXITCODE" -ForegroundColor Red
         $Failed += "Visual Studio 2026 Community"
     }
 
@@ -143,17 +130,24 @@ else {
 }
 
 # -----------------------------------------------------------------------------
-# Remaining packages (simple choco installs)
+# Remaining packages (simple winget installs)
 # -----------------------------------------------------------------------------
 foreach ($pkg in $Packages) {
     Write-Host "`n--- $($pkg.Name) ($($pkg.Id)) ---" -ForegroundColor Cyan
 
-    # choco install is idempotent (it no-ops with exit code 0 when the same
-    # version is already installed), so there is no need to pre-check state.
-    & choco install $pkg.Id -y --no-progress
+    # Check if the package is already installed before attempting install.
+    # Some installers (e.g. Vulkan SDK) return non-zero when the same version
+    # is already present, which winget reports as a failure.
+    & winget list --id $pkg.Id --exact --accept-source-agreements 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "  [OK] $($pkg.Name) (already installed)" -ForegroundColor Green
+        continue
+    }
+
+    & winget install --id $pkg.Id --scope machine --accept-source-agreements --accept-package-agreements
 
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "  [FAILED] $($pkg.Name) -- choco exited with code $LASTEXITCODE" -ForegroundColor Red
+        Write-Host "  [FAILED] $($pkg.Name) -- winget exited with code $LASTEXITCODE" -ForegroundColor Red
         $Failed += $pkg.Name
     }
     else {
