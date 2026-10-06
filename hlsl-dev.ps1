@@ -923,7 +923,7 @@ function Invoke-DownloadDirect3D {
 # DXC Execution Tests (ExecHLSLTests.dll via TAEF / TE.exe)
 # -----------------------------------------------------------------------------
 # Runs the DirectXShaderCompiler execution test suite (ExecHLSLTests.dll) under
-# the TAEF runner (TE.exe, supplied by the Windows Driver Kit). WARP_DLL and the
+# the TAEF runner (TE.exe, supplied by the Microsoft.Taef NuGet package). WARP_DLL and the
 # Agility SDK default to the preview binaries fetched by download-d3d, and any
 # extra TE.exe arguments (e.g. /p:"ExperimentalShaders=*", /select:..., /name:...)
 # are forwarded verbatim. See README "Running the DXC execution tests" for the
@@ -938,11 +938,11 @@ function Invoke-RunExecTests {
         return
     }
 
-    # Locate the TAEF runner. install-deps.ps1 adds the WDK's host-architecture
+    # Locate the TAEF runner. install-deps.ps1 adds the NuGet package's host-architecture
     # TAEF directory to PATH so TE.exe is directly runnable.
     $te = Get-Command te.exe -ErrorAction SilentlyContinue
     if (-not $te) {
-        throw "te.exe (TAEF) not found on PATH. Re-run install-deps.ps1 to add the Windows Driver Kit's TAEF directory to PATH."
+        throw "te.exe (TAEF) not found on PATH. Re-run install-deps.ps1 to install TAEF and configure its environment."
     }
 
     # Resolve WARP_DLL / D3D12SDKPath, defaulting to the download-d3d binaries.

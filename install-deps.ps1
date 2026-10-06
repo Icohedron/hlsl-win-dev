@@ -358,7 +358,18 @@ $taefPackages = Get-ChildItem -Path $NuGetPackagesDir -Directory -Filter "$TaefP
         [version]$_.Name.Substring("$TaefPackageId.".Length)
     } -Descending
 foreach ($taefPackage in $taefPackages) {
-    $candidate = Join-Path $taefPackage.FullName "build\Binaries\$taefArch"
+    $taefBinariesDir = Join-Path $taefPackage.FullName "build\Binaries"
+    $taefReleaseDir = Join-Path $taefBinariesDir "Release"
+    if (-not (Test-Path $taefReleaseDir)) {
+        New-Item -ItemType Directory -Path $taefReleaseDir | Out-Null
+    }
+
+    $candidate = Join-Path $taefReleaseDir $taefArch
+    if (-not (Test-Path $candidate)) {
+        $taefArchDir = Join-Path $taefBinariesDir $taefArch
+        New-Item -ItemType Junction -Path $candidate -Target $taefArchDir | Out-Null
+    }
+
     if (Test-Path (Join-Path $candidate "TE.exe")) {
         $TAEFDir = $candidate
         break
