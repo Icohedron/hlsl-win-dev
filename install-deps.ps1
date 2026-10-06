@@ -2,12 +2,12 @@
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-    Installs all HLSL Developer Environment dependencies via winget.
+    Installs all HLSL Developer Environment dependencies.
 
 .DESCRIPTION
-    Uses winget to install every prerequisite for building LLVM (with HLSL
-    support) and DirectXShaderCompiler on Windows.  All packages are installed
-    with --scope machine so they are available system-wide.
+    Uses winget and NuGet to install every prerequisite for building LLVM
+    (with HLSL support) and DirectXShaderCompiler on Windows.  Packages are
+    installed machine-wide.
 
     Must be run from an elevated (Administrator) PowerShell session.
 
@@ -49,15 +49,14 @@ $VSComponents = @(
     "Microsoft.VisualStudio.Component.VC.Llvm.ClangToolset",      # MSBuild support for LLVM (clang-cl) toolset
     "Microsoft.VisualStudio.Component.VC.ATL",                    # C++ ATL for x64/x86 (Latest MSVC)
     "Microsoft.VisualStudio.Component.VC.ATL.ARM64",              # C++ ATL for ARM64 (Latest MSVC)
-    "Component.Microsoft.Windows.DriverKit"                       # Windows Driver Kit (includes TAEF)
+    "Component.Microsoft.Windows.DriverKit"                       # Windows Driver Kit VS integration
 )
 
 $Packages = @(
     @{ Id = "Microsoft.Git";                        Name = "Git" },
     @{ Id = "KhronosGroup.VulkanSDK";               Name = "Vulkan SDK" },
     @{ Id = "Python.Python.3.14";                   Name = "Python 3.14" },
-    @{ Id = "Mozilla.sccache";                      Name = "sccache" },
-    @{ Id = "Microsoft.WindowsWDK.10.0.26100";      Name = "Windows Driver Kit - Windows 10.0.26100.6584" }
+    @{ Id = "Mozilla.sccache";                      Name = "sccache" }
 )
 
 # -----------------------------------------------------------------------------
@@ -155,6 +154,88 @@ foreach ($pkg in $Packages) {
     }
 }
 
+$osArch = $env:PROCESSOR_ARCHITECTURE
+if ($env:PROCESSOR_ARCHITEW6432) { $osArch = $env:PROCESSOR_ARCHITEW6432 }
+
+switch ($osArch) {
+    "AMD64" { $taefArch = "x64" }
+    "ARM64" { $taefArch = "arm64" }
+    default { throw "Unsupported host architecture '$osArch'. TAEF supports x64 and ARM64 hosts." }
+}
+
+$NuGetMirror = "https://packagefeedproxy.microsoft.io/nuget/v3/index.json"
+$NuGetToolsDir = Join-Path $env:ProgramData "hlsl-win-dev\tools"
+$NuGetExe = Join-Path $NuGetToolsDir "nuget.exe"
+$NuGetPackagesDir = Join-Path $env:ProgramData "hlsl-win-dev\packages"
+
+if (-not (Test-Path $NuGetExe)) {
+    New-Item -ItemType Directory -Path $NuGetToolsDir -Force | Out-Null
+
+    try {
+        Write-Host "  Downloading NuGet CLI..." -ForegroundColor DarkGray
+        Invoke-WebRequest -Uri "https://dist.nuget.org/win-x86-commandline/latest/nuget.exe" `
+            -OutFile $NuGetExe -UseBasicParsing
+    }
+    catch {
+        Write-Host "  Primary NuGet CLI download failed; bootstrapping from the Microsoft mirror..." -ForegroundColor Yellow
+
+        $mirrorIndex = Invoke-RestMethod -Uri $NuGetMirror -UseBasicParsing
+        $searchResource = $mirrorIndex.resources |
+            Where-Object { $_.'@type' -like "SearchQueryService*" } |
+            Select-Object -First 1 -ExpandProperty '@id'
+        $packageBaseResource = $mirrorIndex.resources |
+            Where-Object { $_.'@type' -eq "PackageBaseAddress/3.0.0" } |
+            Select-Object -First 1 -ExpandProperty '@id'
+
+        if (-not $searchResource -or -not $packageBaseResource) {
+            throw "The Microsoft NuGet mirror does not expose the resources needed to download the NuGet CLI."
+        }
+
+        $queryUri = "${searchResource}?q=NuGet.CommandLine&prerelease=false&semVerLevel=2.0.0&take=20"
+        $nugetMetadata = (Invoke-RestMethod -Uri $queryUri -UseBasicParsing).data |
+            Where-Object { $_.id -eq "NuGet.CommandLine" } |
+            Select-Object -First 1
+        if (-not $nugetMetadata) {
+            throw "NuGet.CommandLine was not found on the Microsoft NuGet mirror."
+        }
+
+        $nugetVersion = $nugetMetadata.version.ToLowerInvariant()
+        $nugetPackage = Join-Path $env:TEMP "nuget.commandline.$nugetVersion.nupkg"
+        $nugetArchive = "$nugetPackage.zip"
+        $nugetExtractDir = Join-Path $env:TEMP "nuget.commandline.$nugetVersion"
+        $packageUri = "${packageBaseResource}nuget.commandline/$nugetVersion/nuget.commandline.$nugetVersion.nupkg"
+
+        Invoke-WebRequest -Uri $packageUri -OutFile $nugetPackage -UseBasicParsing
+        Copy-Item $nugetPackage $nugetArchive -Force
+        if (Test-Path $nugetExtractDir) {
+            Remove-Item -Path $nugetExtractDir -Recurse -Force
+        }
+        Expand-Archive -Path $nugetArchive -DestinationPath $nugetExtractDir -Force
+        Copy-Item (Join-Path $nugetExtractDir "tools\NuGet.exe") $NuGetExe -Force
+        Remove-Item -Path $nugetPackage, $nugetArchive, $nugetExtractDir -Recurse -Force
+    }
+}
+
+# -----------------------------------------------------------------------------
+# TAEF (TE.exe)
+# -----------------------------------------------------------------------------
+Write-Host "`n--- TAEF (NuGet) ---" -ForegroundColor Cyan
+
+$TaefPackageId = "Microsoft.Taef"
+$TaefPackageSource = "https://pkgs.dev.azure.com/shine-oss/microsoft-ui-xaml/_packaging/WinUI-Dependencies/nuget/v3/index.json"
+
+New-Item -ItemType Directory -Path $NuGetPackagesDir -Force | Out-Null
+& $NuGetExe install $TaefPackageId -OutputDirectory $NuGetPackagesDir `
+    -Source $TaefPackageSource -NonInteractive -DirectDownload -NoHttpCache
+
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "  [FAILED] TAEF -- NuGet exited with code $LASTEXITCODE" -ForegroundColor Red
+    $Failed += "TAEF ($TaefPackageId)"
+}
+else {
+    Write-Host "  [OK] TAEF ($TaefPackageId)" -ForegroundColor Green
+}
+
 # -----------------------------------------------------------------------------
 # Refresh PATH from the registry so newly-installed tools are visible
 # -----------------------------------------------------------------------------
@@ -231,64 +312,24 @@ else {
 }
 
 # -----------------------------------------------------------------------------
-# Post-install: Add Windows Driver Kit TAEF (TE.exe) to the system PATH
+# Post-install: Add TAEF (TE.exe) to the system PATH
 # -----------------------------------------------------------------------------
-# The DXC HLSL test suite drives TAEF via TE.exe, which ships with the Windows
-# Driver Kit under <KitsRoot10>\Testing\Runtimes\TAEF\<arch>\TE.exe.  The WDK
-# installer deliberately leaves this off PATH (it expects MSBuild integration
-# via $(KitsRoot10) to pick a per-project architecture), so we add the host
-# architecture's TAEF directory here for direct command-line use.
-Write-Host "`n--- Windows Driver Kit TAEF (TE.exe) ---" -ForegroundColor Cyan
+# The DXC HLSL test suite drives TAEF via TE.exe.  The Microsoft.Taef NuGet
+# package ships architecture-specific binaries under build\Binaries, so add
+# the host architecture's directory for direct command-line use.
+Write-Host "`n--- TAEF PATH (TE.exe) ---" -ForegroundColor Cyan
 
 $TAEFDir = $null
 
-# Locate the Windows Kits root via the standard "Installed Roots" registry key.
-$kitsRootKeys = @(
-    "HKLM:\SOFTWARE\Microsoft\Windows Kits\Installed Roots",
-    "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows Kits\Installed Roots"
-)
-$KitsRoot10 = $null
-foreach ($krk in $kitsRootKeys) {
-    if (Test-Path $krk) {
-        $candidate = (Get-ItemProperty $krk -ErrorAction SilentlyContinue).KitsRoot10
-        if ($candidate -and (Test-Path $candidate)) {
-            $KitsRoot10 = $candidate
-            break
-        }
-    }
-}
-
-# Fall back to the default install location if the registry lookup failed.
-if (-not $KitsRoot10) {
-    $defaultRoot = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10"
-    if (Test-Path $defaultRoot) {
-        $KitsRoot10 = $defaultRoot
-    }
-}
-
-if ($KitsRoot10) {
-    # Pick the TAEF subdirectory matching the OS architecture.  TAEF ships
-    # x86 (top-level), x64, and arm64 builds; HLSL tests run as native
-    # processes so match the OS, not the PowerShell process bitness.
-    $osArch = $env:PROCESSOR_ARCHITECTURE
-    if ($env:PROCESSOR_ARCHITEW6432) { $osArch = $env:PROCESSOR_ARCHITEW6432 }
-    switch ($osArch) {
-        "AMD64" { $taefArch = "x64" }
-        "ARM64" { $taefArch = "arm64" }
-        "x86"   { $taefArch = "x86" }
-        default { $taefArch = "x64" }
-    }
-
-    $candidate = Join-Path $KitsRoot10 "Testing\Runtimes\TAEF\$taefArch"
+$taefPackages = Get-ChildItem -Path $NuGetPackagesDir -Directory -Filter "$TaefPackageId.*" -ErrorAction SilentlyContinue |
+    Sort-Object {
+        [version]$_.Name.Substring("$TaefPackageId.".Length)
+    } -Descending
+foreach ($taefPackage in $taefPackages) {
+    $candidate = Join-Path $taefPackage.FullName "build\Binaries\$taefArch"
     if (Test-Path (Join-Path $candidate "TE.exe")) {
         $TAEFDir = $candidate
-    }
-    else {
-        # Fall back to the top-level TAEF directory (x86) shipped with the WDK.
-        $candidate = Join-Path $KitsRoot10 "Testing\Runtimes\TAEF"
-        if (Test-Path (Join-Path $candidate "TE.exe")) {
-            $TAEFDir = $candidate
-        }
+        break
     }
 }
 
@@ -310,9 +351,9 @@ if ($TAEFDir) {
     $env:Path = "$env:Path;$TAEFDir"
 }
 else {
-    Write-Host "  [FAILED] Could not locate TE.exe under the Windows Driver Kit." -ForegroundColor Red
-    Write-Host "           Ensure the Windows Driver Kit installed successfully and re-run this script." -ForegroundColor Red
-    $Failed += "Windows Driver Kit TAEF (TE.exe)"
+    Write-Host "  [FAILED] Could not locate TE.exe under the installed Microsoft.Taef package." -ForegroundColor Red
+    Write-Host "           Ensure the TAEF NuGet package installed successfully and re-run this script." -ForegroundColor Red
+    $Failed += "TAEF (TE.exe)"
 }
 
 # -----------------------------------------------------------------------------
