@@ -448,7 +448,8 @@ function Test-Prerequisites {
         # Validate that this bash understands native Windows paths.
         # WSL's bash.exe lives in System32 and requires /mnt/c/... paths.
         $bashExe = $bash.Source
-        $testResult = & $bashExe -c "[[ -f `"$($bashExe.Replace('\','\\'))`" ]]" 2>&1
+        # [[ ]] preserves spaces in $1 without embedded quotes, which PowerShell 5.1 strips.
+        $testResult = & $bashExe -c '[[ -f $1 ]]' -- $bashExe 2>$null
         if ($LASTEXITCODE -eq 0) {
             Write-Host "  [OK] bash ($bashExe)" -ForegroundColor Green
         }
